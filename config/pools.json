@@ -1,0 +1,6 @@
+{
+    "kawpow": "stratum+tcp://rvn.2miners.com:6060",
+    "autolykos2": "stratum+tcp://erg.2miners.com:8888",
+    "karlsenv2": "stratum+tcp://pool.woolypooly.com:3132",
+    "beam-iii": "stratum+tcp://beamhash.unmineable.com:3333"
+}
