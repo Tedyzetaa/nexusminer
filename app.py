@@ -3,10 +3,10 @@ import json
 import time
 import datetime
 import requests 
+import pandas as pd
 from core.api_market import obter_rentabilidade_atual
 from core.gpu_telemetry import obter_status_gpu
 from core.process_manager import GerenciadorMinerador
-import pandas as pd # NOVO: Biblioteca para desenhar a tabela de extrato
 
 st.set_page_config(page_title="Nexus Auto-Miner", layout="wide")
 
@@ -21,45 +21,70 @@ def buscar_mercado_cache():
     return obter_rentabilidade_atual()
 
 @st.cache_data(ttl=60)
-def consultar_saldo_pool(carteira_completa):
+def consultar_saldo_pool(algoritmo, carteira):
     try:
-        if ":" in carteira_completa:
-            moeda = carteira_completa.split(":")[0]
-            endereco = carteira_completa.split(":")[1].split(".")[0]
-            
-            url = f"https://api.unminable.com/v4/address/{endereco}?coin={moeda}"
-            res = requests.get(url, timeout=3)
+        # Se for Unmineable Modo Anônimo (Antigo)
+        if algoritmo == "beam-iii" and ":" in carteira:
+            moeda = carteira.split(":")[0]
+            endereco = carteira.split(":")[1].split(".")[0]
+            res = requests.get(f"https://api.unminable.com/v4/address/{endereco}?coin={moeda}", timeout=3)
             if res.status_code == 200:
-                saldo = res.json().get('data', {}).get('balance', 0.0)
-                return float(saldo), moeda
+                return float(res.json().get('data', {}).get('balance', 0.0)), moeda
+                
+        # Se for HeroMiners
+        elif algoritmo == "karlsenv2":
+            res = requests.get(f"https://karlsen.herominers.com/api/stats_address?address={carteira}", timeout=3)
+            if res.status_code == 200:
+                saldo_bruto = int(res.json().get('stats', {}).get('balance', 0))
+                return float(saldo_bruto / 100000000), "KLS"
+                
+        # NOVO: Se for Unmineable Modo Conta Privada (Novo Dashboard)
+        elif algoritmo == "beam-iii" and ":" not in carteira:
+            return 0.0, "NO SITE"
     except:
         pass
-    return 0.0, "NANO"
+    
+    sigla = "NANO"
+    if algoritmo == "karlsenv2": sigla = "KLS"
+    elif ":" not in carteira: sigla = "CONTA"
+    return 0.0, sigla
 
-# NOVO: Função para puxar o histórico de pagamentos/recompensas da API
-@st.cache_data(ttl=120) # Atualiza a cada 2 minutos para não sobrecarregar
-def consultar_extrato(carteira_completa):
+@st.cache_data(ttl=120)
+def consultar_extrato(algoritmo, carteira):
     try:
-        if ":" in carteira_completa:
-            moeda = carteira_completa.split(":")[0]
-            endereco = carteira_completa.split(":")[1].split(".")[0]
-            
-            # Bate na rota de pagamentos da Unmineable
-            url = f"https://api.unminable.com/v4/address/{endereco}/payments?coin={moeda}"
-            res = requests.get(url, timeout=3)
+        if algoritmo == "beam-iii" and ":" in carteira:
+            moeda = carteira.split(":")[0]
+            endereco = carteira.split(":")[1].split(".")[0]
+            res = requests.get(f"https://api.unminable.com/v4/address/{endereco}/payments?coin={moeda}", timeout=3)
             if res.status_code == 200:
-                lista_pagamentos = res.json().get('data', {}).get('list', [])
-                return lista_pagamentos
+                return res.json().get('data', {}).get('list', [])
+        elif algoritmo == "karlsenv2":
+            res = requests.get(f"https://karlsen.herominers.com/api/stats_address?address={carteira}", timeout=3)
+            if res.status_code == 200:
+                pagamentos = res.json().get('payments', [])
+                extrato_formatado = []
+                for p in pagamentos:
+                    extrato_formatado.append({
+                        "Data": datetime.datetime.fromtimestamp(p['timestamp']).strftime('%Y-%m-%d %H:%M:%S'),
+                        "Valor": f"{p['amount'] / 100000000:.4f} KLS",
+                        "Transação (TX)": p['tx'][:20] + "..."
+                    })
+                return extrato_formatado
     except:
         pass
     return []
 
-def obter_link_unmineable(carteira_completa):
-    if ":" in carteira_completa:
-        moeda = carteira_completa.split(":")[0]
-        endereco = carteira_completa.split(":")[1].split(".")[0]
+def obter_link_pool(algoritmo, carteira):
+    # Se for Conta Privada, leva pro Dashboard Geral de login
+    if algoritmo == "beam-iii" and ":" not in carteira:
+        return "https://unmineable.com/dashboard"
+    elif algoritmo == "beam-iii" and ":" in carteira:
+        moeda = carteira.split(":")[0]
+        endereco = carteira.split(":")[1].split(".")[0]
         return f"https://unmineable.com/coins/{moeda}/address/{endereco}"
-    return "https://unmineable.com/"
+    elif algoritmo == "karlsenv2":
+        return f"https://karlsen.herominers.com/?context=address&mac={carteira}"
+    return "#"
 
 def adicionar_log(mensagem):
     agora = datetime.datetime.now().strftime("%H:%M:%S")
@@ -88,7 +113,8 @@ gpu_stats = obter_status_gpu()
 mercado, melhor_algo = buscar_mercado_cache()
 
 velocidade_atual = ler_api_minerador()
-saldo_atual, sigla_moeda = consultar_saldo_pool(wallets[melhor_algo])
+
+saldo_atual, sigla_moeda = consultar_saldo_pool(melhor_algo, wallets[melhor_algo])
 
 if st.session_state.minerando:
     st.session_state.grafico_velocidade.append(velocidade_atual)
@@ -104,18 +130,24 @@ if temp_atual >= 90:
 
 with col1: st.metric("🌡️ Temp. GPU", str_temp)
 with col2: st.metric("⚡ Consumo", f"{gpu_stats['energia_w']} W")
-with col3: st.metric("📈 Algoritmo Seguro", melhor_algo.upper(), f"${mercado[melhor_algo]}/dia")
-with col4: st.metric("🚀 Hashrate Real", f"{velocidade_atual} Sol/s") 
-with col5: st.metric("💰 Saldo na Pool", f"{saldo_atual:.6f} {sigla_moeda}") 
+with col3: st.metric("📈 Algoritmo", melhor_algo.upper())
+unidade_hash = "Sol/s" if melhor_algo == "beam-iii" else "MH/s"
+with col4: st.metric("🚀 Hashrate Real", f"{velocidade_atual} {unidade_hash}") 
+
+# Exibição inteligente para conta privada
+if sigla_moeda in ["NO SITE", "CONTA"]:
+    with col5: st.metric("🔒 Conta Privada", "Ver Dashboard")
+else:
+    with col5: st.metric("💰 Saldo na Pool", f"{saldo_atual:.6f} {sigla_moeda}") 
 
 st.divider()
 
 col_grafico, col_controle = st.columns([3, 1])
 
 with col_grafico:
-    st.subheader("Estabilidade da Mineração (Sol/s)")
+    st.subheader(f"Estabilidade da Mineração ({unidade_hash})")
     if st.session_state.resfriando:
-        st.warning("⚠️ Mineração pausada automaticamente. Aguardando a placa resfriar até 65 °C para segurança do equipamento...")
+        st.warning("⚠️ Mineração pausada automaticamente. Aguardando a placa resfriar até 65 °C...")
     elif len(st.session_state.grafico_velocidade) > 0:
         st.line_chart(st.session_state.grafico_velocidade, height=150)
     else:
@@ -135,32 +167,25 @@ with col_controle:
             adicionar_log("▶️ Minerador ativado! Iniciando motores...")
             
     st.markdown("<br>", unsafe_allow_html=True)
-    link_banco = obter_link_unmineable(wallets[melhor_algo])
-    st.link_button("🏦 Acessar Conta Unmineable", link_banco, use_container_width=True)
+    link_banco = obter_link_pool(melhor_algo, wallets[melhor_algo])
+    st.link_button(f"🏦 Abrir Dashboard", link_banco, use_container_width=True)
 
 st.divider()
 
-# ==========================================
-# NOVO BLOCO: TABELA DE EXTRATO (LOGS)
-# ==========================================
-st.subheader(f"🧾 Histórico de Depósitos ({sigla_moeda})")
-extrato = consultar_extrato(wallets[melhor_algo])
+st.subheader(f"🧾 Histórico de Depósitos")
+extrato = consultar_extrato(melhor_algo, wallets[melhor_algo])
 
-if extrato:
-    # Se a API retornou dados, cria uma tabela bonita usando Pandas
+if sigla_moeda in ["NO SITE", "CONTA"]:
+    st.info("🔒 Seu minerador está conectado a uma Conta Privada. Clique no botão 'Abrir Dashboard' acima para acompanhar seus ganhos em tempo real.")
+elif extrato:
     df = pd.DataFrame(extrato)
     st.dataframe(df, use_container_width=True, hide_index=True)
 else:
-    # Se a API estiver bloqueada ou vazia, mostra uma mensagem amigável
-    st.info("Nenhum depósito recente encontrado ou a API está temporariamente indisponível. Clique no botão 'Acessar Conta Unmineable' acima para ver os logs completos.")
+    st.info("Nenhum depósito recente encontrado ou a API está temporariamente indisponível.")
 
 st.divider()
 
-# ==========================================
-# O CÉREBRO TÉRMICO E EVENTOS
-# ==========================================
 if st.session_state.minerando:
-    
     if temp_atual >= 90 and not st.session_state.resfriando:
         st.session_state.resfriando = True
         st.session_state.gerenciador.parar()
@@ -173,7 +198,7 @@ if st.session_state.minerando:
     if not st.session_state.resfriando:
         algo_atual = st.session_state.gerenciador.algo_atual
         if algo_atual != melhor_algo:
-            if algo_atual is None: adicionar_log(f"Iniciando mineração de {melhor_algo.upper()}...")
+            if algo_atual is None: adicionar_log(f"Iniciando mineração de {melhor_algo.upper()} (Conta Logada)...")
             
             sucesso = st.session_state.gerenciador.iniciar(melhor_algo, wallets[melhor_algo], pools[melhor_algo])
             if sucesso: adicionar_log(f"✅ {melhor_algo.upper()} rodando. Aguardando conexão com a pool...")
